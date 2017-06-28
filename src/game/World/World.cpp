@@ -1,12 +1,12 @@
 /*
- * Copyright (C) 2016+     AzerothCore <www.azerothcore.org>, released under GNU GPL v2 license: http://github.com/azerothcore/azerothcore-wotlk/LICENSE-GPL2
- * Copyright (C) 2008-2016 TrinityCore <http://www.trinitycore.org/>
- * Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
- */
+* Copyright (C) 2016+     AzerothCore <www.azerothcore.org>, released under GNU GPL v2 license: http://github.com/azerothcore/azerothcore-wotlk/LICENSE-GPL2
+* Copyright (C) 2008-2016 TrinityCore <http://www.trinitycore.org/>
+* Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
+*/
 
- /** \file
-	 \ingroup world
- */
+/** \file
+\ingroup world
+*/
 
 #include "Common.h"
 #include "DatabaseEnv.h"
@@ -76,16 +76,19 @@
 #include "AsyncAuctionListing.h"
 #include "SavingSystem.h"
 
- // playerbot mod
+// playerbot mod
 #include "../../modules/bot/playerbot/playerbot.h"
 #include "../../modules/bot/playerbot/PlayerbotAIConfig.h"
 #include "../../modules/bot/playerbot/RandomPlayerbotMgr.h"
+
+// AHBot mod
+#include "AuctionHouseBot.h"
+#include "../../modules/bot/ahbot/AhBot.h"
 
 ACE_Atomic_Op<ACE_Thread_Mutex, bool> World::m_stopEvent = false;
 uint8 World::m_ExitCode = SHUTDOWN_EXIT_CODE;
 uint32 World::m_worldLoopCounter = 0;
 uint32 World::m_gameMSTime = 0;
-
 
 float World::m_MaxVisibleDistanceOnContinents = DEFAULT_VISIBILITY_DISTANCE;
 float World::m_MaxVisibleDistanceInInstances = DEFAULT_VISIBILITY_INSTANCE;
@@ -1260,6 +1263,9 @@ void World::LoadConfigSettings(bool reload)
 
 	m_int_configs[CONFIG_BIRTHDAY_TIME] = sConfigMgr->GetIntDefault("BirthdayTime", 1222964635);
 
+	// AHBot
+	m_int_configs[CONFIG_AHBOT_UPDATE_INTERVAL] = sConfigMgr->GetIntDefault("AuctionHouseBot.Update.Interval", 20);
+
 	// call ScriptMgr if we're reloading the configuration
 	sScriptMgr->OnAfterConfigLoad(reload);
 }
@@ -1316,10 +1322,10 @@ void World::SetInitialWorldSettings()
 	if (!sObjectMgr->LoadTrinityStrings())
 		exit(1);                                            // Error message displayed in function already
 
-	///- Update the realm entry in the database with the realm type from the config file
-	//No SQL injection as values are treated as integers
+															///- Update the realm entry in the database with the realm type from the config file
+															//No SQL injection as values are treated as integers
 
-	// not send custom type REALM_FFA_PVP to realm list
+															// not send custom type REALM_FFA_PVP to realm list
 	uint32 server_type;
 	if (IsFFAPvPRealm())
 		server_type = REALM_TYPE_PVP;
@@ -1330,10 +1336,10 @@ void World::SetInitialWorldSettings()
 
 	LoginDatabase.PExecute("UPDATE realmlist SET icon = %u, timezone = %u WHERE id = '%d'", server_type, realm_zone, realmID);      // One-time query
 
-	///- Remove the bones (they should not exist in DB though) and old corpses after a restart
+																																	///- Remove the bones (they should not exist in DB though) and old corpses after a restart
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_OLD_CORPSES);
 	stmt->setUInt32(0, 3 * DAY);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	///- Load the DBC files
 	sLog->outString("Initialize data stores...");
@@ -1762,6 +1768,7 @@ void World::SetInitialWorldSettings()
 	m_timers[WUPDATE_WEATHERS].SetInterval(1 * IN_MILLISECONDS);
 	m_timers[WUPDATE_AUCTIONS].SetInterval(MINUTE*IN_MILLISECONDS);
 	m_timers[WUPDATE_AUCTIONS].SetCurrent(MINUTE*IN_MILLISECONDS);
+	m_timers[WUPDATE_AUCTIONS_PENDING].SetInterval(250);
 
 	m_timers[WUPDATE_CORPSES].SetInterval(20 * MINUTE * IN_MILLISECONDS);
 	//erase corpses every 20 minutes
@@ -1771,7 +1778,7 @@ void World::SetInitialWorldSettings()
 
 	m_timers[WUPDATE_PINGDB].SetInterval(getIntConfig(CONFIG_DB_PING_INTERVAL)*MINUTE*IN_MILLISECONDS);    // Mysql ping time in minutes
 
-	// our speed up
+																										   // our speed up
 	m_timers[WUPDATE_5_SECS].SetInterval(5 * IN_MILLISECONDS);
 
 	mail_expire_check_timer = time(NULL) + 6 * 3600;
@@ -1787,7 +1794,10 @@ void World::SetInitialWorldSettings()
 	uint32 nextGameEvent = sGameEventMgr->StartSystem();
 	m_timers[WUPDATE_EVENTS].SetInterval(nextGameEvent);    //depend on next event
 
-	// Delete all characters which have been deleted X days before
+															// for AHBot
+	m_timers[WUPDATE_AHBOT].SetInterval(getIntConfig(CONFIG_AHBOT_UPDATE_INTERVAL) * IN_MILLISECONDS); // every 20 sec
+
+																									   // Delete all characters which have been deleted X days before
 	Player::DeleteOldCharacters();
 
 	// Delete all custom channels which haven't been used for PreserveCustomChannelDuration days.
@@ -1858,6 +1868,11 @@ void World::SetInitialWorldSettings()
 	mgr->LoadChannels();
 
 	// playerbot mod
+	sLog->outString("Initializing AuctionHouseBot...");
+	sAuctionBot->Initialize();
+	//sAuctionBotConfig->Initialize();
+
+	//auctionbot.Init();
 	sPlayerbotAIConfig.Initialize();
 
 	uint32 startupDuration = GetMSTimeDiffToNow(startupBegin);
@@ -1983,7 +1998,7 @@ void World::Update(uint32 diff)
 
 		// moved here from HandleCharEnumOpcode
 		PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_EXPIRED_BANS);
-		CharacterDatabase.DirectExecute(stmt);
+		CharacterDatabase.Execute(stmt);
 
 		// copy players hashmapholder to avoid mutex
 		WhoListCacheMgr::Update();
@@ -2014,6 +2029,12 @@ void World::Update(uint32 diff)
 	sRandomPlayerbotMgr.UpdateAI(diff);
 	sRandomPlayerbotMgr.UpdateSessions(diff);
 
+	if (m_timers[WUPDATE_AHBOT].Passed())
+	{
+		sAuctionBot->Update();
+		m_timers[WUPDATE_AHBOT].Reset();
+	}
+
 	// pussywizard:
 	// acquire mutex now, this is kind of waiting for listing thread to finish it's work (since it can't process next packet)
 	// so we don't have to do it in every packet that modifies auctions
@@ -2043,6 +2064,14 @@ void World::Update(uint32 diff)
 	// end of section with mutex
 	AsyncAuctionListingMgr::SetAuctionListingAllowed(true);
 
+
+	if (m_timers[WUPDATE_AUCTIONS_PENDING].Passed())
+	{
+		m_timers[WUPDATE_AUCTIONS_PENDING].Reset();
+
+		sAuctionMgr->UpdatePendingAuctions();
+	}
+
 	/// <li> Handle weather updates when the timer has passed
 	if (m_timers[WUPDATE_WEATHERS].Passed())
 	{
@@ -2062,7 +2091,7 @@ void World::Update(uint32 diff)
 			stmt->setUInt32(0, sWorld->getIntConfig(CONFIG_LOGDB_CLEARTIME));
 			stmt->setUInt32(1, uint32(time(0)));
 
-			LoginDatabase.DirectExecute(stmt);
+			LoginDatabase.Execute(stmt);
 		}
 	}
 
@@ -2087,7 +2116,7 @@ void World::Update(uint32 diff)
 
 	sLFGMgr->Update(diff, 2); // pussywizard: handle created proposals
 
-	// execute callbacks from sql queries that were queued recently
+							  // execute callbacks from sql queries that were queued recently
 	ProcessQueryCallbacks();
 
 	///- Erase corpses once every 20 minutes
@@ -2215,7 +2244,7 @@ namespace Trinity
 	};
 }                                                           // namespace Trinity
 
-/// Send a System Message to all players (except self if mentioned)
+															/// Send a System Message to all players (except self if mentioned)
 void World::SendWorldText(int32 string_id, ...)
 {
 	va_list ap;
@@ -2310,7 +2339,7 @@ void World::KickAll()
 {
 	m_QueuedPlayer.clear();                                 // prevent send queue update packet and login queued sessions
 
-	// session not removed at kick and will removed in next update tick
+															// session not removed at kick and will removed in next update tick
 	for (SessionMap::const_iterator itr = m_sessions.begin(); itr != m_sessions.end(); ++itr)
 		itr->second->KickPlayer();
 
@@ -2348,7 +2377,7 @@ BanReturn World::BanAccount(BanMode mode, std::string const& nameOrIP, std::stri
 		stmt->setUInt32(1, duration_secs);
 		stmt->setString(2, author);
 		stmt->setString(3, reason);
-		LoginDatabase.DirectExecute(stmt);
+		LoginDatabase.Execute(stmt);
 		break;
 	case BAN_ACCOUNT:
 		// No SQL injection with prepared statements
@@ -2411,7 +2440,7 @@ BanReturn World::BanAccount(BanMode mode, std::string const& nameOrIP, std::stri
 				sess->KickPlayer();
 	} while (resultAccounts->NextRow());
 
-	LoginDatabase.DirectCommitTransaction(trans); /*update to direct*/
+	LoginDatabase.CommitTransaction(trans);
 
 	return BAN_SUCCESS;
 }
@@ -2424,7 +2453,7 @@ bool World::RemoveBanAccount(BanMode mode, std::string const& nameOrIP)
 	{
 		stmt = LoginDatabase.GetPreparedStatement(LOGIN_DEL_IP_NOT_BANNED);
 		stmt->setString(0, nameOrIP);
-		LoginDatabase.DirectExecute(stmt);
+		LoginDatabase.Execute(stmt);
 	}
 	else
 	{
@@ -2440,7 +2469,7 @@ bool World::RemoveBanAccount(BanMode mode, std::string const& nameOrIP)
 		//NO SQL injection as account is uint32
 		stmt = LoginDatabase.GetPreparedStatement(LOGIN_UPD_ACCOUNT_NOT_BANNED);
 		stmt->setUInt32(0, account);
-		LoginDatabase.DirectExecute(stmt);
+		LoginDatabase.Execute(stmt);
 	}
 	return true;
 }
@@ -2466,14 +2495,14 @@ BanReturn World::BanCharacter(std::string const& name, std::string const& durati
 	// make sure there is only one active ban
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_CHARACTER_BAN);
 	stmt->setUInt32(0, guid);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	stmt = CharacterDatabase.GetPreparedStatement(CHAR_INS_CHARACTER_BAN);
 	stmt->setUInt32(0, guid);
 	stmt->setUInt32(1, duration_secs);
 	stmt->setString(2, author);
 	stmt->setString(3, reason);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	if (pBanned)
 		pBanned->GetSession()->KickPlayer();
@@ -2498,7 +2527,7 @@ bool World::RemoveBanCharacter(std::string const& name)
 
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_CHARACTER_BAN);
 	stmt->setUInt32(0, guid);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 	return true;
 }
 
@@ -2795,7 +2824,7 @@ void World::_UpdateRealmCharCount(PreparedQueryResult resultCharCount)
 		stmt->setUInt32(2, realmID);
 		trans->Append(stmt);
 
-		LoginDatabase.DirectCommitTransaction(trans); /*update to direct*/
+		LoginDatabase.CommitTransaction(trans);
 	}
 }
 
@@ -2887,7 +2916,7 @@ void World::InitGuildResetTime()
 void World::ResetDailyQuests()
 {
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_QUEST_STATUS_DAILY);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	for (SessionMap::const_iterator itr = m_sessions.begin(); itr != m_sessions.end(); ++itr)
 		if (itr->second->GetPlayer())
@@ -2922,7 +2951,7 @@ void World::SetPlayerSecurityLimit(AccountTypes _sec)
 void World::ResetWeeklyQuests()
 {
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_QUEST_STATUS_WEEKLY);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	for (SessionMap::const_iterator itr = m_sessions.begin(); itr != m_sessions.end(); ++itr)
 		if (itr->second->GetPlayer())
@@ -2940,7 +2969,7 @@ void World::ResetMonthlyQuests()
 	sLog->outString("Monthly quests reset for all characters.");
 
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_QUEST_STATUS_MONTHLY);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	for (SessionMap::const_iterator itr = m_sessions.begin(); itr != m_sessions.end(); ++itr)
 		if (itr->second->GetPlayer())
@@ -2954,7 +2983,7 @@ void World::ResetEventSeasonalQuests(uint16 event_id)
 {
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_QUEST_STATUS_SEASONAL);
 	stmt->setUInt16(0, event_id);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	for (SessionMap::const_iterator itr = m_sessions.begin(); itr != m_sessions.end(); ++itr)
 		if (itr->second->GetPlayer())
@@ -2966,7 +2995,7 @@ void World::ResetRandomBG()
 	;//sLog->outDetail("Random BG status reset for all characters.");
 
 	PreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_BATTLEGROUND_RANDOM);
-	CharacterDatabase.DirectExecute(stmt);
+	CharacterDatabase.Execute(stmt);
 
 	for (SessionMap::const_iterator itr = m_sessions.begin(); itr != m_sessions.end(); ++itr)
 		if (itr->second->GetPlayer())
@@ -3057,7 +3086,7 @@ void World::setWorldState(uint32 index, uint64 value)
 		stmt->setUInt32(0, uint32(value));
 		stmt->setUInt32(1, index);
 
-		CharacterDatabase.DirectExecute(stmt);
+		CharacterDatabase.Execute(stmt);
 	}
 	else
 	{
@@ -3066,7 +3095,7 @@ void World::setWorldState(uint32 index, uint64 value)
 		stmt->setUInt32(0, index);
 		stmt->setUInt32(1, uint32(value));
 
-		CharacterDatabase.DirectExecute(stmt);
+		CharacterDatabase.Execute(stmt);
 	}
 	m_worldstates[index] = value;
 }

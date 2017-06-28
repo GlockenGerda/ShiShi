@@ -67,6 +67,7 @@ include_directories(
   
   ${CMAKE_SOURCE_DIR}/modules/bot
   ${CMAKE_SOURCE_DIR}/modules/bot/pch
+  ${CMAKE_SOURCE_DIR}/modules/bot/ahbot
   ${CMAKE_SOURCE_DIR}/modules/bot/playerbot
   ${CMAKE_SOURCE_DIR}/modules/bot/playerbot/strategy
   ${CMAKE_SOURCE_DIR}/modules/bot/playerbot/strategy/actions
@@ -95,7 +96,7 @@ include_directories(
   ${CMAKE_SOURCE_DIR}/src/game/AI/ScriptedAI
   ${CMAKE_SOURCE_DIR}/src/game/AI/SmartScripts
   ${CMAKE_SOURCE_DIR}/src/game/AuctionHouse
-  ${CMAKE_SOURCE_DIR}/src/game/AuctionHouse/AuctionHouseBot
+  ${CMAKE_SOURCE_DIR}/src/game/AuctionHouseBot
   ${CMAKE_SOURCE_DIR}/src/game/Battlefield
   ${CMAKE_SOURCE_DIR}/src/game/Battlefield/Zones
   ${CMAKE_SOURCE_DIR}/src/game/Battlegrounds
